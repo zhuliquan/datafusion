@@ -282,6 +282,13 @@ impl PhysicalExpr for BinaryExpr {
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
+        if self.op == Operator::Or {
+            return self.evaluate_logical_or(batch);
+        }
+        if self.op == Operator::And {
+            return self.evaluate_logical_and(batch);
+        }
+
         use arrow::compute::kernels::numeric::*;
 
         let lhs = self.left.evaluate(batch)?;
@@ -617,6 +624,58 @@ impl BinaryExpr {
         };
 
         Ok(scalar_result)
+    }
+
+    fn evaluate_logical_or(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
+        let lhs = self.left.evaluate(batch)?;
+        let lhs = lhs.into_array(batch.num_rows())?;
+
+        // got selection
+        let selection = as_boolean_array(&lhs)?;
+        let selection = if let Some(null) = selection.nulls() {
+            let mask = &(selection.values() & null.inner());
+            &BooleanArray::new(!mask, None)
+        } else {
+            &BooleanArray::new(!selection.values(), None)
+        };
+
+        let rhs = self.right.evaluate_selection(batch, selection)?;
+        let rhs = rhs.into_array(batch.num_rows())?;
+
+        // got result
+        let result = self.evaluate_with_resolved_args(
+            lhs,
+            &DataType::Boolean,
+            rhs,
+            &DataType::Boolean,
+        )?;
+        Ok(ColumnarValue::Array(result))
+    }
+
+    fn evaluate_logical_and(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
+        let lhs = self.left.evaluate(batch)?;
+        let lhs = lhs.into_array(batch.num_rows())?;
+
+        // got selection
+        let selection = as_boolean_array(&lhs)?;
+        let selection = if let Some(null) = selection.nulls() {
+            let mask = selection.values() | &(!null.inner());
+            &BooleanArray::new(mask, None)
+        } else {
+            selection
+        };
+
+        let rhs = self.right.evaluate_selection(batch, selection)?;
+        let rhs = rhs.into_array(batch.num_rows())?;
+
+        // got result
+        let result = self.evaluate_with_resolved_args(
+            lhs,
+            &DataType::Boolean,
+            rhs,
+            &DataType::Boolean,
+        )?;
+        Ok(ColumnarValue::Array(result))
     }
 
     fn evaluate_with_resolved_args(
